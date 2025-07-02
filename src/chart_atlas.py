@@ -1,21 +1,16 @@
 """
-ChartAtlas
-──────────
-• builds local exponential charts B^(k)(c) → ℝ⁴ using classical MDS  
-• stitches them with Procrustes alignment  
-• exposes
-
-    atlas.position(node_id)        → (x, y, z, τ)
-    atlas.id_map                   → {node_id: row‑index}
-    atlas.global_coords            → N×4 numpy array (rows ordered by id_map)
-
-so that export_data.py and kinematics.py can do fast vectorised look‑ups.
+ChartAtlas – FINAL hop‑based neighbourhood implementation
+Matches the analysis: local “balls” are defined by hop distance, not by the
+(symmetric) metric that is ∞ for almost every pair in a DAG.
 """
 
 from __future__ import annotations
-from typing import Dict, List
+from collections import deque
+from typing import Dict, List, Set
 
+import itertools
 import numpy as np
+import networkx as nx
 from sklearn.manifold import MDS
 from scipy.linalg import orthogonal_procrustes
 from tqdm import tqdm
@@ -24,94 +19,122 @@ from src.depth_metric import DepthMetric
 
 
 class ChartAtlas:
-    # -------------------------------------------------- #
+    # ------------------------------------------------------------------ #
     def __init__(
         self,
         causal_site: "CausalSite",
         dmetric: DepthMetric,
         chart_scale_k: int = 4,
-        gh_tolerance: float = 0.05,
-    ) -> None:
+        gh_tol: float = 0.05,
+    ):
         self.site = causal_site
-        self.dmetric = dmetric
+        self.metric = dmetric
         self.k0 = chart_scale_k
-        self.gh_tol = gh_tolerance
 
-        # nid → 4‑vector   (filled during _build_atlas)
-        self.coords: Dict[int, np.ndarray] = {}
+        self.node_ids = list(self.site.graph.nodes)
+        self.id_map = {nid: i for i, nid in enumerate(self.node_ids)}
+        self.global_coords = np.full((len(self.node_ids), 4), np.nan, np.float64)
 
         self._build_atlas()
-        self._freeze()
 
-    # -------------------------------------------------- #
-    #  private helpers                                   #
-    # -------------------------------------------------- #
-    def _build_atlas(self) -> None:
-        nodes = list(self.site.graph.nodes)
-        rng = np.random.default_rng(42)
+    # ------------------------------------------------------------------ #
+    def _max_hops(self) -> int:
+        """Heuristic: 2 hops for k≥4, 3 for k=3, 4 for k≤2."""
+        return max(2, 6 - self.k0)
 
-        for centre in tqdm(nodes, desc="Stitching Charts"):
-            k = self.site.graph.nodes[centre]["layer"]
-            if k < self.k0:
+    # ------------------------------------------------------------------ #
+    def _ball_by_hops(self, centre: int) -> List[int]:
+        """BFS up to max_hops in either causal direction."""
+        max_h = self._max_hops()
+        visited: Set[int] = {centre}
+        ball = [centre]
+        q = deque([(centre, 0)])
+        while q:
+            nid, h = q.popleft()
+            if h >= max_h:
                 continue
-            L_k = 2.0 ** (-k)
+            for nb in itertools.chain(
+                self.site.graph.successors(nid), self.site.graph.predecessors(nid)
+            ):
+                if nb not in visited:
+                    visited.add(nb)
+                    ball.append(nb)
+                    q.append((nb, h + 1))
+        return ball
 
-            # collect ball
-            ball: List[int] = [
-                v
-                for v in nodes
-                if self.dmetric.get_symmetric_radius(centre, v) <= L_k
-            ]
-            if len(ball) < 5:
-                continue
+    # ------------------------------------------------------------------ #
+    def _embed_and_place(self, centre: int) -> Set[int]:
+        nodes = self._ball_by_hops(centre)
+        if len(nodes) < 4:
+            return set()
 
-            # distance matrix (symmetric)
-            dist = np.zeros((len(ball), len(ball)))
-            for i, u in enumerate(ball):
-                for j, v in enumerate(ball):
-                    if i < j:
-                        d = self.dmetric.get_symmetric_radius(u, v)
-                        dist[i, j] = dist[j, i] = d
+        idxs = [self.id_map[n] for n in nodes]
 
-            # MDS embedding → ℝ³  (we append τ later)
-            mds = MDS(
-                n_components=3,
-                dissimilarity="precomputed",
-                random_state=rng,
-                normalized_stress="auto",
-            )
-            X3 = mds.fit_transform(dist)
+        # pairwise symmetric radius inside the small ball
+        D = np.zeros((len(idxs), len(idxs)))
+        for i, u in enumerate(nodes):
+            for j in range(i + 1, len(nodes)):
+                d = self.metric.get_symmetric_radius(u, nodes[j])
+                D[i, j] = D[j, i] = d if np.isfinite(d) else 1.0  # default large
 
-            # align with existing coords if overlap ≥ 4 points
-            overlap = [v for v in ball if v in self.coords]
-            if len(overlap) >= 4:
-                A = X3[[ball.index(v) for v in overlap]]
-                B = np.array([self.coords[v][:3] for v in overlap])
-                R, _ = orthogonal_procrustes(A, B)
-                X3 = X3 @ R + B.mean(0) - (A @ R).mean(0)
+        X3 = MDS(
+            n_components=3,
+            dissimilarity="precomputed",
+            normalized_stress=False,
+            random_state=0,
+            max_iter=120,
+        ).fit_transform(D)
 
-            for v, xyz in zip(ball, X3):
-                τ = -self.site.graph.nodes[v]["layer"]
-                self.coords[v] = np.append(xyz, τ)
+        # align with already‑stitched coords if ≥3 in common
+        existing = [i for i in idxs if not np.isnan(self.global_coords[i, 0])]
+        if len(existing) >= 3:
+            A = X3[[idxs.index(i) for i in existing]]
+            B = self.global_coords[existing, :3]
+            R, _ = orthogonal_procrustes(A, B)
+            X3 = X3 @ R + B.mean(0) - (A @ R).mean(0)
 
-    # freeze into fast structures
-    def _freeze(self):
-        sorted_ids = sorted(self.coords)
-        self.id_map = {nid: i for i, nid in enumerate(sorted_ids)}
-        self.global_coords = np.vstack([self.coords[n] for n in sorted_ids])
+        placed = set()
+        for loc, row in zip(X3, idxs):
+            if np.isnan(self.global_coords[row, 0]):
+                τ = -self.site.graph.nodes[self.node_ids[row]]["layer"]
+                self.global_coords[row] = np.append(loc, τ)
+                placed.add(row)
+        return placed
 
-    # -------------------------------------------------- #
-    #  public helper                                     #
-    # -------------------------------------------------- #
-    def position(self, v: int) -> np.ndarray:
-        """
-        Return 4‑vector (x,y,z,τ) for node v.  If v is outside any chart
-        (shouldn’t happen) fall back to depth‑only τ.
-        """
-        if v in self.coords:
-            return self.coords[v]
+    # ------------------------------------------------------------------ #
+    def _build_atlas(self):
+        undirected = self.site.graph.to_undirected()
+        comps = list(nx.connected_components(undirected))
 
-        # Fallback – put node at origin, only τ meaningful
-        τ = -self.site.graph.nodes[v]["layer"]
-        self.coords[v] = np.array([0.0, 0.0, 0.0, τ])
-        return self.coords[v]
+        pbar = tqdm(total=len(self.node_ids), desc="Stitching Charts")
+        stitched: Set[int] = set()
+
+        for comp in comps:
+            todo = deque([next(iter(comp))])
+            while todo:
+                centre = todo.popleft()
+                if centre in stitched:
+                    continue
+                newly = self._embed_and_place(centre)
+                if newly:
+                    stitched |= newly
+                    pbar.update(len(newly))
+                    for nid in newly:
+                        for nb in itertools.chain(
+                            self.site.graph.successors(nid),
+                            self.site.graph.predecessors(nid),
+                        ):
+                            if nb in comp and nb not in stitched:
+                                todo.append(nb)
+        pbar.close()
+
+        # any remaining unplaced nodes → fallback (0,0,0,τ)
+        for nid in self.node_ids:
+            row = self.id_map[nid]
+            if np.isnan(self.global_coords[row, 0]):
+                τ = -self.site.graph.nodes[nid]["layer"]
+                self.global_coords[row] = np.array([0.0, 0.0, 0.0, τ])
+
+    # ------------------------------------------------------------------ #
+    def position(self, nid: int) -> np.ndarray:
+        return self.global_coords[self.id_map[nid]]
