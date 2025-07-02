@@ -1,6 +1,6 @@
 # Simulation Parameters
 simulation:
-  total_ticks: 16000
+  total_ticks: 2000
   seed: 42  # For reproducibility
   hide_layer_index: 0
   log_interval: 100
@@ -8,7 +8,7 @@ simulation:
 
 # Causal Site (Graph) Parameters
 causal_site:
-  layers: 2000
+  layers: 100
   avg_nodes_per_layer: 32
   edge_probability: 0.15
   max_lookback_layers: 4
