@@ -1,86 +1,93 @@
 #!/usr/bin/env python3
-"""
-export_data.py
-──────────────
-▸ Generates two artefacts in the ./results folder
-
-    1. static_universe.json   – graph topology + 4‑D coordinates
-    2. simulation_log.jsonl   – per‑tick particle list
-
-The script assumes you have already installed requirements.txt plus tqdm.
-"""
-
 from __future__ import annotations
-import json, os, pathlib
-from typing import Dict, Any
+import json, pathlib, warnings, math
+from typing import Any
 
 from tqdm import tqdm
+import numpy as np
 
 from src.config import CONFIG
 from src.causal_site import CausalSite
 from src.state_manager import StateManager
 from src.particle_detector import ParticleDetector
 
-
-RESULTS = pathlib.Path("results")
-RESULTS.mkdir(exist_ok=True)
+OUT = pathlib.Path("results"); OUT.mkdir(exist_ok=True)
 
 
-def dump_static_universe(site: CausalSite) -> None:
-    """Write nodes + edges with 4‑D coordinates (x,y,z,τ)."""
-    out: Dict[str, Any] = {"nodes": {}, "edges": list(site.graph.edges())}
+# ───────── helpers ─────────────────────────────────────────────────────────
+def to_py(obj: Any) -> Any:
+    """Deep‑convert numpy scalars and kill non‑finite floats."""
+    if isinstance(obj, dict):
+        return {k: to_py(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [to_py(v) for v in obj]
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating, float)):
+        return None if not math.isfinite(obj) else float(obj)
+    return obj
 
-    for nid, data in site.graph.nodes(data=True):
-        if nid in site.node_positions:
-            # --- FIX: Get position from site.node_positions, not site.atlas ---
-            x, y, z, t = site.node_positions[nid].tolist()
-            out["nodes"][str(nid)] = {
-                "id": nid, # Also include ID for robust parsing in JS
-                "layer": data["layer"],
-                "position": [x, y, z, t],
-            }
 
-    (RESULTS / "static_universe.json").write_text(
-        json.dumps(out, indent=2)
-    )
+def serialisable_particle(p):
+    d = to_py(p.__dict__)
+    d["nodes"] = [int(n) for n in p.nodes]
+    return d
+
+
+# ───────── static substrate ───────────────────────────────────────────────
+def dump_static(site: CausalSite):
+    data = {
+        "nodes": {
+            str(n): {
+                "layer": int(meta["layer"]),
+                "position": list(map(float, site.atlas.position(n)))
+            } for n, meta in site.graph.nodes(data=True)
+        },
+        "edges": [[int(u), int(v)] for u, v in site.graph.edges()],
+    }
+    (OUT / "static_universe.json").write_text(json.dumps(data, indent=2))
     print("✓ static_universe.json written")
 
 
-def dump_dynamic_log(site: CausalSite, sm: StateManager, det: ParticleDetector) -> None:
-    """Run the simulation and emit one JSON line per tick."""
-    total = CONFIG["simulation"]["total_ticks"]
-    with (RESULTS / "simulation_log.jsonl").open("w") as fp:
-        for tick in tqdm(range(total), desc="ticks"):
+# ───────── dynamic log ────────────────────────────────────────────────────
+def dump_log(site: CausalSite, sm: StateManager, det: ParticleDetector):
+    total       = CONFIG["simulation"]["total_ticks"]
+    interval    = max(1, CONFIG["simulation"].get("log_interval", 1))  # safeguard
+    verbose     = CONFIG["simulation"].get("verbose", False)
+
+    path = OUT / "simulation_log.jsonl"
+    with path.open("w") as fp:
+        for t in tqdm(range(total), desc="ticks"):
             sm.tick()
-            parts = det.detect(sm.get_current_state(), tick)
-            frame = {
-                "tick": tick,
-                "particles": [p.__dict__ for p in parts.values()],
-            }
-            fp.write(json.dumps(frame) + "\n")
-    print("✓ simulation_log.jsonl written")
+
+            # detect particles every tick so lifetimes are correct
+            live = det.detect(sm.get_current_state(), t)
+
+            # -------- console logging -------------------------------------
+            if verbose and t % interval == 0:
+                print(f"[t={t:>6}] active: {len(live):>4}")
+
+            # -------- write to JSONL only each `interval` ticks ------------
+            if t % interval == 0 or t == total - 1:
+                frame = {
+                    "tick":            int(t),
+                    "particles": [serialisable_particle(p) for p in live.values()],
+                }
+                fp.write(json.dumps(frame) + "\n")
+
+    print(f"✓ simulation_log.jsonl written  (saved every {interval} ticks)")
 
 
-def main() -> None:
-    # ------------------------------------------------------------------ #
-    #  Build causal site and geometry                                    #
-    # ------------------------------------------------------------------ #
-    site = CausalSite(CONFIG)
-    site.generate_graph()
-    site.build_emergent_geometry()      # ← builds site.atlas & site.metric
+# ───────── main ───────────────────────────────────────────────────────────
+def main():
+    warnings.filterwarnings("ignore", message="The default value of `n_init`", category=FutureWarning)
 
-    # ------------------------------------------------------------------ #
-    #  Dump static substrate                                             #
-    # ------------------------------------------------------------------ #
-    dump_static_universe(site)
+    site = CausalSite(CONFIG); site.generate_graph(); site.build_emergent_geometry()
+    dump_static(site)
 
-    # ------------------------------------------------------------------ #
-    #  Simulation                                                        #
-    # ------------------------------------------------------------------ #
-    state_mgr = StateManager(site, CONFIG)
-    detector = ParticleDetector(site, state_mgr, CONFIG)
-
-    dump_dynamic_log(site, state_mgr, detector)
+    sm = StateManager(site, CONFIG)
+    det = ParticleDetector(site, sm, CONFIG)
+    dump_log(site, sm, det)
 
 
 if __name__ == "__main__":
