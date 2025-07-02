@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Emergent-Universe Simulation Dashboard</title>
+
+<script src="https://cdn.tailwindcss.com"></script>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+
+<style>
+    html,body{height:100%;background:#0f172a;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}
+    /* nice, thin scrollbars */
+    ::-webkit-scrollbar       {width: 8px}
+    ::-webkit-scrollbar-thumb {background:#334155;border-radius:4px}
+    /* D3 Axis color */
+    .axis path, .axis line { stroke: #475569; }
+    .axis text { fill: #94a3b8; }
+</style>
+</head>
+<body class="flex flex-col">
+
+<header class="p-4 sm:p-6 lg:px-8 flex flex-col gap-1 border-b border-slate-800 shrink-0">
+    <h1 class="text-2xl sm:text-3xl font-extrabold bg-gradient-to-r from-violet-400 to-cyan-400 text-transparent bg-clip-text">Emergent‑Universe Simulation Dashboard</h1>
+    <p class="text-xs text-slate-400">Drop <code>simulation_log.jsonl</code> anywhere on the page to analyze a new run.</p>
+</header>
+
+<section id="kpi-bar" class="hidden grid grid-cols-2 sm:grid-cols-4 gap-3 p-4 lg:px-8 bg-slate-900 border-b border-slate-800 shrink-0">
+    </section>
+
+<main id="charts" class="hidden grow grid grid-cols-1 md:grid-cols-2 gap-6 p-4 sm:p-6 lg:px-8 overflow-y-auto">
+    <figure id="donut"              class="rounded-xl bg-slate-800 p-5 shadow-lg"></figure>
+    <figure id="bars"               class="rounded-xl bg-slate-800 p-5 shadow-lg"></figure>
+    <figure id="velocity-scatter"   class="rounded-xl bg-slate-800 p-5 shadow-lg"></figure>
+    <figure id="histogram"          class="rounded-xl bg-slate-800 p-5 shadow-lg"></figure>
+</main>
+
+<input id="file-input" type="file" accept=".jsonl" class="hidden">
+<div id="drop-cover" class="fixed inset-0 flex flex-col items-center justify-center pointer-events-none bg-slate-900/50 transition-opacity duration-200 opacity-0 backdrop-blur-sm">
+    <div class="text-9xl text-slate-700">＋</div>
+    <p class="mt-2 text-slate-400">Drop the log file to load</p>
+</div>
+
+<div id="tooltip" class="pointer-events-none fixed z-50 px-2 py-1 text-xs rounded-md bg-slate-200 text-slate-900 shadow opacity-0 transition-opacity"></div>
+
+<script>
+/* ════════════════════════════════════════════════════════════════════════ */
+/* 1.  HIGH‑LEVEL HELPERS                                                 */
+/* ════════════════════════════════════════════════════════════════════════ */
+const $qs   = sel => document.querySelector(sel);
+const fmt   = d3.format(",");
+
+function showTooltip(html,x,y){
+    const tt=$qs('#tooltip');
+    tt.innerHTML=html;
+    tt.style.left = x+15+'px';
+    tt.style.top  = y+15+'px';
+    tt.style.opacity=1;
+}
+function hideTooltip(){ $qs('#tooltip').style.opacity=0 }
+
+/* ════════════════════════════════════════════════════════════════════════ */
+/* 2.  DRAG‑AND‑DROP + FILE PICKER                                        */
+/* ════════════════════════════════════════════════════════════════════════ */
+const dropCover=$qs('#drop-cover');
+
+['dragenter','dragover'].forEach(ev=>{
+    document.body.addEventListener(ev,e=>{
+        e.preventDefault();
+        dropCover.style.opacity=1;
+    },false);
+});
+['dragleave','drop'].forEach(ev=>{
+    document.body.addEventListener(ev,e=>{
+        e.preventDefault();
+        if(ev==='drop') handleFile(e.dataTransfer.files[0]);
+        dropCover.style.opacity=0;
+    },false);
+});
+document.body.addEventListener('click', (e) => {
+    // Prevent click from triggering if it's on an interactive element
+    if (e.target.closest('button, a, input')) return;
+    $qs('#file-input').click();
+});
+$qs('#file-input').addEventListener('change',e=> handleFile(e.target.files[0]) );
+
+/* ════════════════════════════════════════════════════════════════════════ */
+/* 3.  MAIN ENTRY: read, parse, dispatch                                  */
+/* ════════════════════════════════════════════════════════════════════════ */
+async function handleFile(file){
+    if(!file) return;
+    if(!file.name.endsWith('.jsonl')){
+        alert('Please select a simulation_log.jsonl file'); return;
+    }
+    const text = await file.text();
+    const particles=[];
+    let maxTick=0;
+    text.trim().split(/\r?\n/).forEach(line=>{
+        try{
+            const j=JSON.parse(line);
+            maxTick = Math.max(maxTick, j.tick??0);
+            if(Array.isArray(j.particles)) particles.push(...j.particles);
+        }catch(e){ /* ignore bad lines */ }
+    });
+    if(!particles.length){
+        alert('No particles found in this log file. The simulation may not have reached a state with stable emergent structures.');return;
+    }
+    renderDashboard(particles,maxTick);
+}
+
+/* ════════════════════════════════════════════════════════════════════════ */
+/* 4.  DASHBOARD RENDERING                                                */
+/* ════════════════════════════════════════════════════════════════════════ */
+function renderDashboard(particles,maxTick){
+    /* ----- KPIs -------------------------------------------------------- */
+    const kpi=[{
+        label:'Total particles detected',value:fmt(particles.length)
+    },{
+        label:'Unique particle periods', value:fmt(new Set(particles.map(d=>d.period)).size)
+    },{
+        label:'Longest lifetime (ticks)',value:fmt(d3.max(particles,d=>d.lifetime??0)??0)
+    },{
+        label:'Total ticks in log',value:fmt(maxTick+1)
+    }];
+    const kpiBar=$qs('#kpi-bar');
+    kpiBar.innerHTML='';
+    kpi.forEach(d=>{
+        kpiBar.insertAdjacentHTML('beforeend',`
+           <div class="bg-slate-800 rounded-lg px-3 py-4 text-center shadow">
+               <div class="text-xl font-semibold">${d.value}</div>
+               <div class="text-[0.7rem] uppercase tracking-wide text-slate-400">${d.label}</div>
+           </div>`);
+    });
+    kpiBar.classList.remove('hidden');
+    $qs('#charts').classList.remove('hidden');
+
+    const W = id => $qs(id).clientWidth , H = id => $qs(id).clientHeight;
+    const color=d3.scaleOrdinal(d3.schemeCategory10);
+
+    /* ----- 1. period doughnut ----------------------------------------- */
+    {
+        const id='#donut';
+        $qs(id).innerHTML='<figcaption class="mb-2 font-semibold text-slate-300">Particle Counts by Period</figcaption><svg></svg>';
+        const svg=d3.select(id+' svg').attr('width',W(id)).attr('height',H(id)-30);
+        const radius=Math.min(W(id),H(id)-30)*0.45;
+        const g=svg.append('g').attr('transform',`translate(${W(id)/2},${(H(id)-30)/2})`);
+        const data=d3.rollup(particles,v=>v.length,d=>d.period);
+        const pie=d3.pie().value(d=>d[1]).sort((a,b)=>a[0]-b[0])(data);
+        const arc=d3.arc().innerRadius(radius*0.55).outerRadius(radius);
+        
+        g.selectAll('path').data(pie).join('path')
+            .attr('d',arc)
+            .attr('fill',d=>color(d.data[0]))
+            .on('mousemove',(e,d)=>showTooltip(`Period <b>${d.data[0]}</b><br>Count: ${fmt(d.data[1])}`,e.pageX,e.pageY))
+            .on('mouseleave',hideTooltip);
+    }
+
+    /* ----- 2. average lifetime bar ------------------------------------ */
+    {
+        const id='#bars';
+        $qs(id).innerHTML='<figcaption class="mb-2 font-semibold text-slate-300">Avg. Lifetime by Period</figcaption><svg></svg>';
+        const svg=d3.select(id+' svg').attr('width',W(id)).attr('height',H(id)-30);
+        const margin={top:5,right:10,bottom:20,left:50},
+              w=W(id)-margin.left-margin.right, h=H(id)-30-margin.top-margin.bottom;
+        const g=svg.append('g').attr('transform',`translate(${margin.left},${margin.top})`);
+        const data=Array.from(d3.rollup(particles,v=>d3.mean(v,d=>d.lifetime),d=>d.period),([p,avg])=>({period:p,avg}));
+        data.sort((a,b)=>b.avg-a.avg);
+        const x=d3.scaleLinear().domain([0,d3.max(data,d=>d.avg)]).nice().range([0,w]);
+        const y=d3.scaleBand().domain(data.map(d=>'P '+d.period)).range([0,h]).padding(0.15);
+        g.append('g').attr('class','axis').call(d3.axisLeft(y).tickSizeOuter(0));
+        g.append('g').attr('transform',`translate(0,${h})`).attr('class','axis').call(d3.axisBottom(x).ticks(w/80).tickFormat(fmt));
+        
+        g.selectAll('rect').data(data).join('rect')
+          .attr('y',d=>y('P '+d.period)).attr('height',y.bandwidth())
+          .attr('x',0).attr('width',0).attr('fill',d=>color(d.period))
+          .on('mousemove',(e,d)=>showTooltip(`Period <b>${d.period}</b><br>Avg. Lifetime: ${d.avg.toFixed(1)}`,e.pageX,e.pageY))
+          .on('mouseleave',hideTooltip)
+          .transition().duration(800).attr('width',d=>x(d.avg));
+    }
+
+    /* ----- 3. NEW! speed vs size scatter ------------------------------ */
+    {
+        const id='#velocity-scatter';
+        $qs(id).innerHTML='<figcaption class="mb-2 font-semibold text-slate-300">Particle Speed vs. Size</figcaption><svg></svg>';
+        const svg=d3.select(id+' svg').attr('width',W(id)).attr('height',H(id)-30);
+        const margin={top:5,right:10,bottom:30,left:50},
+              w=W(id)-margin.left-margin.right, h=H(id)-30-margin.top-margin.bottom;
+        const g=svg.append('g').attr('transform',`translate(${margin.left},${margin.top})`);
+        
+        const cleaned=particles.map(d=>{
+            const vel = d.kinematics?.velocity;
+            const speed = vel ? Math.sqrt(vel[0]**2 + vel[1]**2 + vel[2]**2) : 0;
+            return {...d, speed};
+        }).filter(d=>d.speed > 0.001 && d.num_nodes > 0);
+        
+        if (cleaned.length > 0) {
+            const x=d3.scaleLog().domain(d3.extent(cleaned,d=>d.num_nodes)).nice().range([0,w]);
+            const y=d3.scaleLinear().domain(d3.extent(cleaned,d=>d.speed)).nice().range([h,0]);
+            
+            g.append('g').attr('class','axis').attr('transform',`translate(0,${h})`).call(d3.axisBottom(x).ticks(w/80,'.0s'));
+            g.append('g').attr('class','axis').call(d3.axisLeft(y).ticks(h/40));
+            g.append('text').attr('x',w/2).attr('y',h+28).attr('text-anchor','middle').attr('class','text-xs text-slate-400').text('Particle Size (Node Count)');
+            g.append('text').attr('transform','rotate(-90)').attr('y',-40).attr('x',-h/2).attr('text-anchor','middle').attr('class','text-xs text-slate-400').text('Particle Speed');
+
+            g.selectAll('circle').data(cleaned).join('circle')
+            .attr('cx',d=>x(d.num_nodes)).attr('cy',d=>y(d.speed))
+            .attr('r',3).attr('fill',d=>color(d.period)).attr('opacity',.6)
+            .on('mousemove',(e,d)=>showTooltip(`Period <b>${d.period}</b><br>Speed: ${d.speed.toFixed(3)}c<br>Size: ${d.num_nodes} nodes`,e.pageX,e.pageY))
+            .on('mouseleave',hideTooltip);
+        } else {
+             g.append('text').attr('x', w/2).attr('y', h/2).attr('text-anchor','middle').text('No moving particles found.').attr('class','text-slate-500');
+        }
+    }
+
+    /* ----- 4. lifetime histogram -------------------------------------- */
+    {
+        const id='#histogram';
+        $qs(id).innerHTML='<figcaption class="mb-2 font-semibold text-slate-300">Lifetime Distribution</figcaption><svg></svg>';
+        const svg=d3.select(id+' svg').attr('width',W(id)).attr('height',H(id)-30);
+        const margin={top:5,right:10,bottom:30,left:50},
+              w=W(id)-margin.left-margin.right, h=H(id)-30-margin.top-margin.bottom;
+        const g=svg.append('g').attr('transform',`translate(${margin.left},${margin.top})`);
+        
+        const lifetimes=particles.map(d=>d.lifetime).filter(d=>d>0);
+        if (lifetimes.length > 0) {
+            const x=d3.scaleLinear().domain(d3.extent(lifetimes)).nice().range([0,w]);
+            const bins=d3.bin().domain(x.domain()).thresholds(w/15)(lifetimes);
+            const y=d3.scaleLinear().domain([0,d3.max(bins,d=>d.length)]).nice().range([h,0]);
+            
+            g.append('g').attr('class','axis').attr('transform',`translate(0,${h})`).call(d3.axisBottom(x).ticks(w/80));
+            g.append('g').attr('class','axis').call(d3.axisLeft(y).ticks(h/30).tickFormat(d3.format('~s')));
+            g.append('text').attr('x',w/2).attr('y',h+28).attr('text-anchor','middle').attr('class','text-xs text-slate-400').text('Lifetime (ticks)');
+
+            g.selectAll('rect').data(bins).join('rect')
+            .attr('x',d=>x(d.x0)+1).attr('width',d=>Math.max(0,x(d.x1)-x(d.x0)-1))
+            .attr('y',h).attr('height',0).attr('fill','#0ea5e9').attr('opacity',.8)
+            .on('mousemove',(e,d)=>showTooltip(`Range: ${d.x0}–${d.x1}<br>Count: ${d.length}`,e.pageX,e.pageY))
+            .on('mouseleave',hideTooltip)
+            .transition().duration(700).attr('y',d=>y(d.length)).attr('height',d=>h-y(d.length));
+        } else {
+            g.append('text').attr('x', w/2).attr('y', h/2).attr('text-anchor','middle').text('No particle lifetimes to show.').attr('class','text-slate-500');
+        }
+    }
+}
+</script>
+</body>
+</html>

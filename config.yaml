@@ -1,0 +1,41 @@
+# Simulation Parameters
+simulation:
+  total_ticks: 1000
+  seed: 42  # For reproducibility
+  hide_layer_index: 0
+  log_interval: 1000
+  verbose: true
+
+# Causal Site (Graph) Parameters
+causal_site:
+  layers: 100
+  avg_nodes_per_layer: 32
+  edge_probability: 0.12
+  max_lookback_layers: 2
+
+# State & Tag Parameters
+tags:
+  alphabet_size_q: 13
+  max_out_degree_R: 3
+  fusion_mode: "injective" # 'quadratic' or 'injective' or 'sum_mod_q'
+
+# Particle Detection Parameters
+detector:
+  grid_size: 16
+  max_history_length: 2000 # Memory optimization for hash history
+  min_loop_period: 4
+  min_particle_size: 3 # Minimum number of cells in a cluster
+
+# Visualization Parameters
+visualization:
+  enabled: false
+  update_interval: 10
+  save_frames: false
+
+# ------------- Geometry Engine (NEW) ----------
+geometry:
+  # Corresponds to k in L_k = 2^-k for chart radius.
+  # A larger k means smaller, more local charts.
+  chart_scale_k: 4
+
+
