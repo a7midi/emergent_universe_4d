@@ -1,103 +1,161 @@
 <!DOCTYPE html><html lang="en"><head>
   <meta charset="utf-8"><title>Emergent‑Universe Viewer</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <style>html,body{margin:0;height:100%;overflow:hidden;background:#111}
-  canvas{display:block}</style>
+  <style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#000;font-family:sans-serif}
+  canvas{display:block}
+  #hud{position:fixed;bottom:10px;left:50%;transform:translateX(-50%);
+       display:flex;align-items:center;gap:8px;color:#eee;font-size:13px}
+  #seek{width:350px}
+  button{cursor:pointer;padding:2px 10px;border:none;border-radius:3px;background:#1e40af;color:#fff}
+  label{display:flex;align-items:center;gap:4px;cursor:pointer}
+  </style>
   <script type="importmap">
   {"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.163/build/three.module.js",
               "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.163/examples/jsm/"}}
   </script>
   </head><body>
   <canvas id="c"></canvas>
+  <div id="hud">
+      <button id="play">❚❚</button>
+      <input id="seek" type="range" min="0" value="0">
+      <span id="lbl">tick 0</span>
+      <span id="fps">– fps</span>
+      <label><input id="showLines" type="checkbox" checked> substrate</label>
+      <label><input id="showWL"   type="checkbox" checked> world‑lines</label>
+  </div>
+  
   <script type="module">
-  import * as THREE           from 'three';
-  import {OrbitControls}      from 'three/addons/controls/OrbitControls.js';
+  import * as THREE from 'three';
+  import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
   
-  const STATIC="./results/static_universe.json";
-  const LOG   ="./results/simulation_log.jsonl";
-  const TRACK =40, BASE_R=1.0;
+  /* ---------- config ---------- */
+  const STATIC="results/static_universe.json";
+  const LOG   ="results/simulation_log.jsonl";
+  const BASE_R=1;
+  const TRACK =60;
   
-  /* --- load data --------------------------------------------------------- */
+  /* ---------- load ---------- */
   const st  = await fetch(STATIC).then(r=>r.json());
   const txt = await fetch(LOG).then(r=>r.ok?r.text():'');
-  const FR  = txt? txt.trim().split('\n').map(JSON.parse):[];
+  const FR  = txt? txt.trim().split(/\r?\n/).map(JSON.parse):[];
   
-  /* --- three boilerplate ------------------------------------------------- */
+  /* ---------- three boilerplate ---------- */
   const renderer=new THREE.WebGLRenderer({canvas:document.getElementById("c"),antialias:true});
-  renderer.setSize(innerWidth,innerHeight); renderer.setPixelRatio(devicePixelRatio);
+  renderer.setSize(innerWidth,innerHeight);renderer.setPixelRatio(devicePixelRatio);
   const scene=new THREE.Scene();
-  const cam  =new THREE.PerspectiveCamera(60,innerWidth/innerHeight,1,1e6);
-  const ctl  =new OrbitControls(cam,renderer.domElement); ctl.enableDamping=true;
-  scene.add(new THREE.AmbientLight(0xffffff,.9));
+  const cam   =new THREE.PerspectiveCamera(60,innerWidth/innerHeight,1,1e6);
+  const ctl   =new OrbitControls(cam,renderer.domElement);ctl.enableDamping=true;
+  scene.add(new THREE.AmbientLight(0xffffff,0.9));
+  window.addEventListener('resize',()=>{renderer.setSize(innerWidth,innerHeight);
+      cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix()});
   
-  /* --- substrate --------------------------------------------------------- */
-  const nodes=Object.values(st.nodes);
-  const V=nodes.map(n=>new THREE.Vector3(...n.position.slice(0,3)));
-  const box=new THREE.Box3().setFromPoints(V), s=120/box.getSize(new THREE.Vector3()).length();
-  V.forEach(v=>v.multiplyScalar(s));
-  const nGeo=new THREE.SphereGeometry(.8,8,8), nMat=new THREE.MeshBasicMaterial({color:0x488cff,opacity:.3,transparent:true});
-  const nInst=new THREE.InstancedMesh(nGeo,nMat,V.length);
-  V.forEach((v,i)=>nInst.setMatrixAt(i,new THREE.Matrix4().setPosition(v)));
-  scene.add(nInst);
+  /* ---------- substrate ---------- */
+  const nArr=Object.values(st.nodes);
+  const pos=nArr.map(n=>new THREE.Vector3(...n.position.slice(0,3)));
+  const box=new THREE.Box3().setFromPoints(pos);
+  const scale=120/box.getSize(new THREE.Vector3()).length();
+  pos.forEach(p=>p.multiplyScalar(scale));
+  const nGeo=new THREE.SphereGeometry(.9,8,8), nMat=new THREE.MeshBasicMaterial({color:0x3b82f6,transparent:true,opacity:.28});
+  const nMesh=new THREE.InstancedMesh(nGeo,nMat,pos.length);
+  pos.forEach((v,i)=>nMesh.setMatrixAt(i,new THREE.Matrix4().setPosition(v)));
+  scene.add(nMesh);
   
   const ePos=new Float32Array(st.edges.length*6);
-  st.edges.forEach((e,i)=>{
-    const a=V[e[0]], b=V[e[1]];
-    ePos.set([a.x,a.y,a.z,b.x,b.y,b.z],i*6);
-  });
+  st.edges.forEach((e,i)=>{const a=pos[e[0]],b=pos[e[1]];
+      ePos.set([a.x,a.y,a.z,b.x,b.y,b.z],i*6)});
   const eGeo=new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(ePos,3));
-  scene.add(new THREE.LineSegments(eGeo,new THREE.LineBasicMaterial({color:0x386cff,opacity:.15,transparent:true})));
+  const eMat=new THREE.LineBasicMaterial({color:0x3b82f6,opacity:.1,transparent:true});
+  const eLines=new THREE.LineSegments(eGeo,eMat);scene.add(eLines);
   
-  /* --- particles --------------------------------------------------------- */
+  /* ---------- particles ---------- */
   const MAXP=Math.max(1,...FR.map(f=>f.particles.length));
-  const pGeo=new THREE.IcosahedronGeometry(BASE_R,0),
-        pMat=new THREE.MeshStandardMaterial({vertexColors:true,roughness:.3,metalness:.1}),
-        pInst=new THREE.InstancedMesh(pGeo,pMat,MAXP);
-  pInst.instanceColor=new THREE.InstancedBufferAttribute(new Float32Array(MAXP*3),3);
-  scene.add(pInst);
+  const pGeo=new THREE.IcosahedronGeometry(BASE_R,0);
+  const pMat=new THREE.MeshStandardMaterial({vertexColors:true,roughness:.3,metalness:.1});
+  const pMesh=new THREE.InstancedMesh(pGeo,pMat,MAXP);
+  pMesh.instanceColor=new THREE.InstancedBufferAttribute(new Float32Array(MAXP*3),3);
+  scene.add(pMesh);
   
-  const linePos=new Float32Array(MAXP*TRACK*6), lineCol=new Float32Array(MAXP*TRACK*6);
+  const linePos=new Float32Array(MAXP*TRACK*6);
+  const lineCol=new Float32Array(MAXP*TRACK*6);
   const lGeo=new THREE.BufferGeometry()
                 .setAttribute('position',new THREE.BufferAttribute(linePos,3))
                 .setAttribute('color',   new THREE.BufferAttribute(lineCol,3));
   const lMat=new THREE.LineBasicMaterial({vertexColors:true,transparent:true,opacity:.6});
-  const wLines=new THREE.LineSegments(lGeo,lMat); scene.add(wLines);
+  const wLines=new THREE.LineSegments(lGeo,lMat);scene.add(wLines);
   const tracks=Array.from({length:MAXP},()=>[]);
   
-  /* --- helpers ----------------------------------------------------------- */
-  const cache=new Map();
-  const col=(p)=>{ if(!cache.has(p)) cache.set(p,new THREE.Color().setHSL((p*.618)%1,.65,.55)); return cache.get(p);};
-  
-  /* --- camera ------------------------------------------------------------ */
-  const c=box.getCenter(new THREE.Vector3()); cam.position.set(c.x,c.y,box.getSize(new THREE.Vector3()).length()*1.1);
-  ctl.target.copy(c);
-  
-  /* --- draw frame -------------------------------------------------------- */
-  function draw(k){
-    const f=FR[k]||{tick:0,particles:[]};
-    let seg=0; const m4=new THREE.Matrix4();
-    for(let i=0;i<MAXP;i++){
-      if(i<f.particles.length){
-        const P=f.particles[i], r=P.kinematics.radius*BASE_R;
-        const [x,y,z]=P.kinematics.centroid;
-        const v3=new THREE.Vector3(x,y,z).multiplyScalar(s);
-        m4.makeScale(r,r,r).setPosition(v3);
-        pInst.setMatrixAt(i,m4);
-        const ccol=col(P.period); pInst.setColorAt(i,ccol);
-  
-        const tr=tracks[i]; tr.push(v3.clone()); if(tr.length>TRACK) tr.shift();
-        tr.forEach((p,j)=>{ if(j===0) return;
-          linePos.set([tr[j-1].x,tr[j-1].y,tr[j-1].z,p.x,p.y,p.z],seg*6);
-          lineCol.set([...ccol.toArray(),...ccol.toArray()],seg*6); seg++;});
-      }else{ m4.makeScale(0,0,0); pInst.setMatrixAt(i,m4); tracks[i]=[]; }
-    }
-    pInst.instanceMatrix.needsUpdate=true; pInst.instanceColor.needsUpdate=true;
-    lGeo.setDrawRange(0,seg*2); lGeo.attributes.position.needsUpdate=true; lGeo.attributes.color.needsUpdate=true;
+  /* ---------- helpers ---------- */
+  const colCache=new Map();
+  function colour(period){
+      if(!colCache.has(period))
+          colCache.set(period,new THREE.Color().setHSL((period*0.618)%1,0.65,0.55));
+      return colCache.get(period);
+  }
+  function setColor(mesh,idx,c){
+      const a=mesh.instanceColor.array; a.set(c.toArray(),idx*3);
   }
   
-  /* --- animation loop ---------------------------------------------------- */
-  let f=0,last=0; function loop(t){requestAnimationFrame(loop);ctl.update();
-    if(t-last>33&&FR.length){f=(f+1)%FR.length;draw(f);last=t;}
-    renderer.render(scene,cam);} draw(0); loop();
+  /* ---------- camera ---------- */
+  const c=box.getCenter(new THREE.Vector3());
+  cam.position.set(c.x,c.y,box.getSize(new THREE.Vector3()).length()*1.15);
+  ctl.target.copy(c);
+  
+  /* ---------- HUD controls ---------- */
+  const playBtn=document.getElementById('play');
+  const seek   =document.getElementById('seek');
+  const lbl    =document.getElementById('lbl');
+  const fpsLbl =document.getElementById('fps');
+  const showLines=document.getElementById('showLines');
+  const showWL  =document.getElementById('showWL');
+  
+  seek.max = Math.max(FR.length-1,0);
+  let frame=0,playing=true;
+  
+  playBtn.onclick=()=>{playing=!playing;playBtn.textContent=playing?'❚❚':'▶︎'};
+  seek.oninput =e=>{frame=+e.target.value;draw(frame,true)};
+  showLines.onchange =()=>{nMesh.visible=eLines.visible=showLines.checked};
+  showWL.onchange    =()=>{wLines.visible=showWL.checked};
+  
+  /* ---------- draw frame ---------- */
+  const m4=new THREE.Matrix4();
+  function draw(k,force=false){
+      const f=FR[k]||{tick:0,particles:[]};
+      lbl.textContent='tick '+f.tick; seek.value=k;
+      let seg=0;
+      for(let i=0;i<MAXP;i++){
+          if(i<f.particles.length){
+              const P=f.particles[i];
+              if(!P.kinematics?.radius) {m4.makeScale(0,0,0);pMesh.setMatrixAt(i,m4);continue;}
+              const r=P.kinematics.radius;
+              const [x,y,z]=P.kinematics.centroid;
+              const v3=new THREE.Vector3(x,y,z).multiplyScalar(scale);
+              m4.makeScale(r,r,r).setPosition(v3);
+              pMesh.setMatrixAt(i,m4);
+              const cc=colour(P.period); setColor(pMesh,i,cc);
+  
+              const tr=tracks[i]; tr.push(v3.clone()); if(tr.length>TRACK) tr.shift();
+              tr.forEach((p,j)=>{
+                  if(j===0) return;
+                  linePos.set([tr[j-1].x,tr[j-1].y,tr[j-1].z,p.x,p.y,p.z],seg*6);
+                  lineCol.set([...cc.toArray(),...cc.toArray()],seg*6); seg++;
+              });
+          }else{
+              m4.makeScale(0,0,0); pMesh.setMatrixAt(i,m4); tracks[i]=[];
+          }
+      }
+      pMesh.instanceMatrix.needsUpdate=true; pMesh.instanceColor.needsUpdate=true;
+      lGeo.setDrawRange(0,seg*2); lGeo.attributes.position.needsUpdate=true; lGeo.attributes.color.needsUpdate=true;
+  }
+  
+  /* ---------- animation loop ---------- */
+  let last=performance.now(),lastFPS=performance.now(),frames=0;
+  function loop(t){
+      requestAnimationFrame(loop); ctl.update();
+      if(playing && t-last>33 && FR.length){frame=(frame+1)%FR.length; draw(frame); last=t;}
+      frames++; if(t-lastFPS>1000){fpsLbl.textContent=Math.round(frames*1000/(t-lastFPS))+' fps'; frames=0; lastFPS=t;}
+      renderer.render(scene,cam);
+  }
+  draw(0,true); loop();
   </script></body></html>
   
